@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"lannel/pkg/tun"
+	"github.com/armamini/lannel/pkg/tun"
 )
 
 func main() {

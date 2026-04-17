@@ -1,4 +1,4 @@
-module lannel
+module github.com/armamini/lannel
 
 go 1.26.1
 

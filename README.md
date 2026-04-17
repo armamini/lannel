@@ -100,10 +100,22 @@ lannel/
 
 ## Installation
 
+### Go Install (Recommended)
+
+```bash
+# Install the server
+go install -v github.com/armamini/lannel/cmd/server@latest
+
+# Install the client
+go install -v github.com/armamini/lannel/cmd/client@latest
+```
+
+Binaries are placed in `$GOPATH/bin` (or `$HOME/go/bin` by default). Make sure it's in your `PATH`.
+
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/lannel.git
+git clone https://github.com/armamini/lannel.git
 cd lannel
 
 # Build both binaries

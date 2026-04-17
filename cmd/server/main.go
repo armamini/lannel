@@ -9,8 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"lannel/pkg/proxy"
-	"lannel/pkg/web"
+	"github.com/armamini/lannel/pkg/proxy"
+	"github.com/armamini/lannel/pkg/web"
 )
 
 func main() {
