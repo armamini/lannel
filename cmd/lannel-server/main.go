@@ -10,12 +10,14 @@ import (
 	"syscall"
 
 	"github.com/armamini/lannel/pkg/proxy"
+	"github.com/armamini/lannel/pkg/tunnel"
 	"github.com/armamini/lannel/pkg/web"
 )
 
 func main() {
 	bindAddr := flag.String("bind", "0.0.0.0", "Address to bind services on")
-	socksPort := flag.Int("socks-port", 1080, "SOCKS5 proxy listen port")
+	socksPort := flag.Int("socks-port", 1080, "SOCKS5 proxy listen port (for manual/browser use)")
+	tunnelPort := flag.Int("tunnel-port", 9090, "Binary tunnel listen port (for CLI client)")
 	httpPort := flag.Int("http-port", 8080, "Web UI listen port")
 	allowedSubnet := flag.String("allowed-subnet", "", "Restrict SOCKS5 to a CIDR (e.g., 192.168.1.0/24). Empty = allow all")
 	flag.Parse()
@@ -26,9 +28,9 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
-	// --- Service A: SOCKS5 Proxy ---
+	// --- Service A: SOCKS5 Proxy (for browsers / manual config / mobile apps) ---
 	proxyServer := proxy.New(proxy.Config{
 		BindAddr:      *bindAddr,
 		Port:          *socksPort,
@@ -38,11 +40,21 @@ func main() {
 		errCh <- proxyServer.ListenAndServe(ctx)
 	}()
 
-	// --- Service B: Web UI ---
+	// --- Service B: Binary Tunnel (for CLI client — faster than SOCKS5) ---
+	tunnelServer := tunnel.NewServer(tunnel.ServerConfig{
+		BindAddr: *bindAddr,
+		Port:     *tunnelPort,
+	})
+	go func() {
+		errCh <- tunnelServer.ListenAndServe(ctx)
+	}()
+
+	// --- Service C: Web UI ---
 	webServer, err := web.New(web.Config{
-		BindAddr:  *bindAddr,
-		HTTPPort:  *httpPort,
-		SocksPort: *socksPort,
+		BindAddr:   *bindAddr,
+		HTTPPort:   *httpPort,
+		SocksPort:  *socksPort,
+		TunnelPort: *tunnelPort,
 	})
 	if err != nil {
 		log.Fatalf("[LANnel Server] Web UI init failed: %v", err)
@@ -51,7 +63,7 @@ func main() {
 		errCh <- webServer.ListenAndServe(ctx)
 	}()
 
-	log.Printf("[LANnel Server] Started (SOCKS5 :%d | Web UI :%d)", *socksPort, *httpPort)
+	log.Printf("[LANnel Server] Started (SOCKS5 :%d | Tunnel :%d | Web UI :%d)", *socksPort, *tunnelPort, *httpPort)
 
 	select {
 	case sig := <-sigCh:

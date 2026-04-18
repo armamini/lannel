@@ -11,15 +11,16 @@ import (
 	"syscall"
 
 	"github.com/armamini/lannel/pkg/tun"
+	"github.com/armamini/lannel/pkg/tunnel"
 )
 
 func main() {
 	serverAddr := flag.String("server", "", "Server LAN IP address (e.g., 192.168.1.10)")
-	socksPort := flag.Int("port", 1080, "Server SOCKS5 port")
+	tunnelPort := flag.Int("port", 9090, "Server tunnel port")
 	flag.Parse()
 
 	if *serverAddr == "" {
-		fmt.Fprintln(os.Stderr, "Usage: lannel-client -server <SERVER_LAN_IP> [-port 1080]")
+		fmt.Fprintln(os.Stderr, "Usage: lannel-client -server <SERVER_LAN_IP> [-port 9090]")
 		os.Exit(1)
 	}
 
@@ -28,8 +29,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	proxyAddr := fmt.Sprintf("%s:%d", *serverAddr, *socksPort)
-	log.Printf("[LANnel Client] Target SOCKS5 proxy: %s", proxyAddr)
+	tunnelAddr := fmt.Sprintf("%s:%d", *serverAddr, *tunnelPort)
+	log.Printf("[LANnel Client] Target tunnel server: %s", tunnelAddr)
 
 	// --- Create TUN interface ---
 	dev, err := tun.NewDevice(*serverAddr)
@@ -55,7 +56,8 @@ func main() {
 	}()
 
 	// --- Start packet forwarding engine ---
-	engine := tun.NewEngine(dev, proxyAddr)
+	tunnelClient := tunnel.NewClient(tunnelAddr)
+	engine := tun.NewEngine(dev, tunnelClient)
 	log.Println("[LANnel Client] System-wide tunnel active. Press Ctrl+C to stop.")
 
 	if err := engine.Run(ctx); err != nil {

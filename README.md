@@ -104,10 +104,10 @@ lannel/
 
 ```bash
 # Install the server
-go install -v github.com/armamini/lannel/cmd/server@latest
+go install -v github.com/armamini/lannel/cmd/lannel-server@latest
 
 # Install the client
-go install -v github.com/armamini/lannel/cmd/client@latest
+go install -v github.com/armamini/lannel/cmd/lannel-client@latest
 ```
 
 Binaries are placed in `$GOPATH/bin` (or `$HOME/go/bin` by default). Make sure it's in your `PATH`.
@@ -119,24 +119,24 @@ git clone https://github.com/armamini/lannel.git
 cd lannel
 
 # Build both binaries
-go build -o lannel-server ./cmd/server
-go build -o lannel-client ./cmd/client
+go build -o lannel-server ./cmd/lannel-server
+go build -o lannel-client ./cmd/lannel-client
 ```
 
 ### Cross-Compile
 
 ```bash
 # Linux
-GOOS=linux GOARCH=amd64 go build -o lannel-server-linux ./cmd/server
-GOOS=linux GOARCH=amd64 go build -o lannel-client-linux ./cmd/client
+GOOS=linux GOARCH=amd64 go build -o lannel-server-linux ./cmd/lannel-server
+GOOS=linux GOARCH=amd64 go build -o lannel-client-linux ./cmd/lannel-client
 
 # Windows
-GOOS=windows GOARCH=amd64 go build -o lannel-server.exe ./cmd/server
-GOOS=windows GOARCH=amd64 go build -o lannel-client.exe ./cmd/client
+GOOS=windows GOARCH=amd64 go build -o lannel-server.exe ./cmd/lannel-server
+GOOS=windows GOARCH=amd64 go build -o lannel-client.exe ./cmd/lannel-client
 
 # macOS (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -o lannel-server-darwin ./cmd/server
-GOOS=darwin GOARCH=arm64 go build -o lannel-client-darwin ./cmd/client
+GOOS=darwin GOARCH=arm64 go build -o lannel-server-darwin ./cmd/lannel-server
+GOOS=darwin GOARCH=arm64 go build -o lannel-client-darwin ./cmd/lannel-client
 ```
 
 ---

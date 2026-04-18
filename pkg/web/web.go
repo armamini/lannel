@@ -12,9 +12,10 @@ import (
 
 // Config holds Web UI configuration.
 type Config struct {
-	BindAddr  string
-	HTTPPort  int
-	SocksPort int
+	BindAddr   string
+	HTTPPort   int
+	SocksPort  int
+	TunnelPort int
 }
 
 // Server is the Web UI HTTP server.
@@ -80,6 +81,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 type templateData struct {
 	LANIP       string
 	SocksPort   int
+	TunnelPort  int
 	QRBlock     template.HTML
 	SocksURI    string
 	CurrentYear int
@@ -95,6 +97,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data := templateData{
 		LANIP:       s.lanIP,
 		SocksPort:   s.cfg.SocksPort,
+		TunnelPort:  s.cfg.TunnelPort,
 		QRBlock:     template.HTML(generateQRInfoBlock(s.lanIP, s.cfg.SocksPort)),
 		SocksURI:    socksURI,
 		CurrentYear: time.Now().Year(),
@@ -157,7 +160,7 @@ const indexHTML = `<!DOCTYPE html>
                 <svg class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/></svg>
                 Connection Details
             </h2>
-            <div class="grid sm:grid-cols-2 gap-4">
+            <div class="grid sm:grid-cols-3 gap-4">
                 <div class="bg-slate-800/50 rounded-xl p-4">
                     <p class="text-xs text-slate-500 uppercase tracking-wider mb-1">Server LAN IP</p>
                     <p class="text-xl font-mono font-bold text-white">{{.LANIP}}</p>
@@ -165,6 +168,10 @@ const indexHTML = `<!DOCTYPE html>
                 <div class="bg-slate-800/50 rounded-xl p-4">
                     <p class="text-xs text-slate-500 uppercase tracking-wider mb-1">SOCKS5 Port</p>
                     <p class="text-xl font-mono font-bold text-white">{{.SocksPort}}</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-xl p-4">
+                    <p class="text-xs text-slate-500 uppercase tracking-wider mb-1">Tunnel Port</p>
+                    <p class="text-xl font-mono font-bold text-white">{{.TunnelPort}}</p>
                 </div>
             </div>
         </div>
@@ -222,16 +229,19 @@ const indexHTML = `<!DOCTYPE html>
             <div id="panel-cli" class="tab-panel p-6 sm:p-8 hidden">
                 <h3 class="text-sm font-semibold text-slate-300 mb-4">System-wide routing via LANnel Client:</h3>
                 <div class="bg-slate-900 rounded-xl p-4 mb-4 relative group">
-                    <button onclick="copyText('./lannel-client -server {{.LANIP}}')" class="copy-btn absolute top-3 right-3 text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded transition-colors opacity-0 group-hover:opacity-100">Copy</button>
-                    <pre class="text-sm text-emerald-400 overflow-x-auto"><code># Run with sudo/admin privileges
-sudo ./lannel-client -server {{.LANIP}}</code></pre>
+                    <button onclick="copyText('sudo lannel-client -server {{.LANIP}}')" class="copy-btn absolute top-3 right-3 text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded transition-colors opacity-0 group-hover:opacity-100">Copy</button>
+                    <pre class="text-sm text-emerald-400 overflow-x-auto"><code># Install
+go install -v github.com/armamini/lannel/cmd/lannel-client@latest
+
+# Run with sudo/admin privileges
+sudo lannel-client -server {{.LANIP}}</code></pre>
                 </div>
                 <div class="space-y-2 text-sm text-slate-400">
-                    <p>The CLI client will:</p>
+                    <p>The CLI client uses a high-performance binary tunnel protocol (port <code class="text-xs bg-slate-800 px-1 rounded">{{.TunnelPort}}</code>) and will:</p>
                     <ol class="list-decimal list-inside space-y-1 ml-2">
                         <li>Create a virtual TUN interface (<code class="text-xs bg-slate-800 px-1 rounded">tun0</code>)</li>
                         <li>Redirect all system traffic through the tunnel</li>
-                        <li>Forward packets to this server's SOCKS5 proxy</li>
+                        <li>Forward packets via binary protocol (faster than SOCKS5)</li>
                         <li>Restore original routes on exit (<code class="text-xs bg-slate-800 px-1 rounded">Ctrl+C</code>)</li>
                     </ol>
                 </div>

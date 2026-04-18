@@ -8,28 +8,30 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/armamini/lannel/pkg/tunnel"
 )
 
 // Engine reads IP packets from a TUN device, identifies TCP/UDP flows,
-// and forwards them through a SOCKS5 proxy.
+// and forwards them through the binary tunnel protocol.
 type Engine struct {
-	dev       *Device
-	proxyAddr string
+	dev    *Device
+	tunnel *tunnel.Client
 
 	// Track active TCP connections to avoid duplicate dials.
 	tcpConns sync.Map // key: "srcIP:srcPort->dstIP:dstPort" -> *tcpFlow
 }
 
 type tcpFlow struct {
-	proxy  net.Conn
+	conn   net.Conn
 	cancel context.CancelFunc
 }
 
 // NewEngine creates a packet forwarding engine.
-func NewEngine(dev *Device, proxyAddr string) *Engine {
+func NewEngine(dev *Device, tunnelClient *tunnel.Client) *Engine {
 	return &Engine{
-		dev:       dev,
-		proxyAddr: proxyAddr,
+		dev:    dev,
+		tunnel: tunnelClient,
 	}
 }
 
@@ -37,7 +39,7 @@ func NewEngine(dev *Device, proxyAddr string) *Engine {
 func (e *Engine) Run(ctx context.Context) error {
 	buf := make([]byte, DefaultMTU+64) // extra headroom
 
-	log.Printf("[Engine] Forwarding packets from %s → SOCKS5 %s", e.dev.Name, e.proxyAddr)
+	log.Printf("[Engine] Forwarding packets from %s via tunnel", e.dev.Name)
 
 	for {
 		select {
@@ -83,7 +85,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		case ProtoTCP:
 			e.handleTCP(ctx, ipHdr)
 		case ProtoUDP:
-			e.handleUDP(ctx, ipHdr)
+			e.handleUDP(ipHdr)
 		}
 	}
 }
@@ -101,13 +103,13 @@ func (e *Engine) handleTCP(ctx context.Context, ipHdr *IPv4Header) {
 
 	key := e.flowKey(ipHdr.SrcIP, tcpHdr.SrcPort, ipHdr.DstIP, tcpHdr.DstPort)
 
-	// On SYN: establish a new SOCKS5 connection for this flow.
+	// On SYN: establish a new tunnel connection for this flow.
 	if tcpHdr.Flags&TCPFlagSYN != 0 && tcpHdr.Flags&TCPFlagACK == 0 {
 		// Close any stale flow
 		if old, loaded := e.tcpConns.LoadAndDelete(key); loaded {
 			f := old.(*tcpFlow)
 			f.cancel()
-			f.proxy.Close()
+			f.conn.Close()
 		}
 
 		go e.dialAndForwardTCP(ctx, key, ipHdr.DstIP, tcpHdr.DstPort)
@@ -119,47 +121,45 @@ func (e *Engine) handleTCP(ctx context.Context, ipHdr *IPv4Header) {
 		if old, loaded := e.tcpConns.LoadAndDelete(key); loaded {
 			f := old.(*tcpFlow)
 			f.cancel()
-			f.proxy.Close()
+			f.conn.Close()
 		}
 	}
 }
 
 func (e *Engine) dialAndForwardTCP(ctx context.Context, key string, dstIP net.IP, dstPort uint16) {
-	proxyConn, err := DialSOCKS5(e.proxyAddr, dstIP, dstPort)
+	conn, err := e.tunnel.DialTCP(dstIP, dstPort)
 	if err != nil {
-		log.Printf("[Engine] TCP dial %s:%d via SOCKS5: %v", dstIP, dstPort, err)
+		log.Printf("[Engine] TCP tunnel dial %s:%d: %v", dstIP, dstPort, err)
 		return
 	}
 
 	flowCtx, flowCancel := context.WithCancel(ctx)
-	flow := &tcpFlow{proxy: proxyConn, cancel: flowCancel}
+	flow := &tcpFlow{conn: conn, cancel: flowCancel}
 	e.tcpConns.Store(key, flow)
 
-	// When context ends, close the connection
 	go func() {
 		<-flowCtx.Done()
-		proxyConn.Close()
+		conn.Close()
 	}()
 
 	log.Printf("[Engine] TCP flow established: %s", key)
 }
 
-func (e *Engine) handleUDP(ctx context.Context, ipHdr *IPv4Header) {
+func (e *Engine) handleUDP(ipHdr *IPv4Header) {
 	transport := ipHdr.Raw[ipHdr.PayloadOff:]
 	udpHdr, err := ParseUDP(transport)
 	if err != nil {
 		return
 	}
 
-	// DNS (port 53) gets special fast-path handling
+	// DNS (port 53) gets special fast-path handling via TCP tunnel
 	if udpHdr.DstPort == 53 {
 		go e.forwardDNS(ipHdr, transport)
 		return
 	}
 
-	// Generic UDP: forward via direct connection (SOCKS5 UDP associate
-	// is often unreliable; direct UDP works when routing is through the proxy)
-	go e.forwardUDPDirect(ipHdr, udpHdr, transport)
+	// Generic UDP: forward via tunnel
+	go e.forwardUDPViaTunnel(ipHdr, udpHdr, transport)
 }
 
 func (e *Engine) forwardDNS(ipHdr *IPv4Header, transport []byte) {
@@ -173,15 +173,15 @@ func (e *Engine) forwardDNS(ipHdr *IPv4Header, transport []byte) {
 		return
 	}
 
-	// Forward DNS query via TCP through SOCKS5 (DNS over TCP)
-	proxyConn, err := DialSOCKS5(e.proxyAddr, ipHdr.DstIP, udpHdr.DstPort)
+	// Forward DNS query via TCP tunnel (DNS over TCP)
+	conn, err := e.tunnel.DialTCP(ipHdr.DstIP, udpHdr.DstPort)
 	if err != nil {
-		log.Printf("[Engine] DNS dial %s: %v", ipHdr.DstIP, err)
+		log.Printf("[Engine] DNS tunnel dial %s: %v", ipHdr.DstIP, err)
 		return
 	}
-	defer proxyConn.Close()
+	defer conn.Close()
 
-	proxyConn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	// DNS over TCP: prepend 2-byte length
 	tcpDNS := make([]byte, 2+len(payload))
@@ -189,13 +189,13 @@ func (e *Engine) forwardDNS(ipHdr *IPv4Header, transport []byte) {
 	tcpDNS[1] = byte(len(payload))
 	copy(tcpDNS[2:], payload)
 
-	if _, err := proxyConn.Write(tcpDNS); err != nil {
+	if _, err := conn.Write(tcpDNS); err != nil {
 		return
 	}
 
 	// Read response length
 	lenBuf := make([]byte, 2)
-	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
 		return
 	}
 	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
@@ -204,24 +204,20 @@ func (e *Engine) forwardDNS(ipHdr *IPv4Header, transport []byte) {
 	}
 
 	resp := make([]byte, respLen)
-	if _, err := io.ReadFull(proxyConn, resp); err != nil {
+	if _, err := io.ReadFull(conn, resp); err != nil {
 		return
 	}
 
-	// We've resolved DNS. The response would need to be injected back
-	// into the TUN as a UDP packet. This requires crafting a raw IP+UDP
-	// response packet — handled by the response injector.
 	e.injectUDPResponse(ipHdr.DstIP, udpHdr.DstPort, ipHdr.SrcIP, udpHdr.SrcPort, resp)
 }
 
-func (e *Engine) forwardUDPDirect(ipHdr *IPv4Header, udpHdr *UDPHeader, transport []byte) {
+func (e *Engine) forwardUDPViaTunnel(ipHdr *IPv4Header, udpHdr *UDPHeader, transport []byte) {
 	payload := transport[8:]
 	if len(payload) == 0 {
 		return
 	}
 
-	dst := net.JoinHostPort(ipHdr.DstIP.String(), fmt.Sprintf("%d", udpHdr.DstPort))
-	conn, err := net.DialTimeout("udp", dst, 5*time.Second)
+	conn, err := e.tunnel.DialUDP(ipHdr.DstIP, udpHdr.DstPort)
 	if err != nil {
 		return
 	}
@@ -297,7 +293,7 @@ func (e *Engine) closeAllFlows() {
 	e.tcpConns.Range(func(key, value any) bool {
 		f := value.(*tcpFlow)
 		f.cancel()
-		f.proxy.Close()
+		f.conn.Close()
 		e.tcpConns.Delete(key)
 		return true
 	})
