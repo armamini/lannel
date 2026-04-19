@@ -2,26 +2,26 @@
 
 **Local Network VPN/Proxy Gateway**
 
-LANnel lets a **Server** machine share its internet connection — including any active VPN tunnel — with **Client** machines on the same LAN. The server exposes a SOCKS5 proxy that follows the host OS's default route, so traffic from connected clients automatically flows through whatever VPN (Windscribe, NordVPN, Nekoray, etc.) is running on the server. The client operates at Layer 3 using a virtual TUN interface, capturing **all** system traffic — not just browser traffic.
+LANnel lets a **Server** machine share its internet connection — including any active VPN tunnel — with **Client** machines on the same LAN. The server runs a high-performance binary tunnel (for the CLI client) and a SOCKS5 proxy (for browsers, mobile apps, and manual configuration), both following the host OS's default route. Traffic from connected clients automatically flows through whatever VPN (Windscribe, NordVPN, Nekoray, etc.) is running on the server. The CLI client operates at Layer 3 using a virtual TUN interface, capturing **all** system traffic — not just browser traffic.
 
 ```
 ┌──────────────────────┐          LAN          ┌──────────────────────┐
 │     Client (B)       │                       │     Server (A)       │
 │                      │                       │                      │
 │  ┌────────────────┐  │                       │  ┌────────────────┐  │
-│  │  Applications  │  │                       │  │  SOCKS5 Proxy  │──┼──► OS Default Route
-│  │  (all traffic) │  │                       │  │   :1080        │  │    (VPN if active)
+│  │  Applications  │  │                       │  │ Binary Tunnel  │──┼──► OS Default Route
+│  │  (all traffic) │  │                       │  │   :9090        │  │    (VPN if active)
 │  └───────┬────────┘  │                       │  └────────────────┘  │
 │          │           │                       │                      │
-│  ┌───────▼────────┐  │    SOCKS5 over TCP    │  ┌────────────────┐  │
-│  │  TUN Interface │  ├───────────────────────►  │   Web UI       │  │
-│  │  (tun0/utun)   │  │                       │  │   :8080        │  │
+│  ┌───────▼────────┐  │  Binary Tunnel (TCP)  │  ┌────────────────┐  │
+│  │  TUN Interface │  ├───────────────────────►  │  SOCKS5 Proxy  │──┼──► OS Default Route
+│  │  (tun0/utun)   │  │                       │  │   :1080        │  │    (browsers/mobile)
 │  └───────┬────────┘  │                       │  └────────────────┘  │
 │          │           │                       │                      │
-│  ┌───────▼────────┐  │                       │                      │
-│  │ Packet Engine  │  │                       │                      │
-│  │ L3 → SOCKS5    │  │                       │                      │
-│  └────────────────┘  │                       │                      │
+│  ┌───────▼────────┐  │                       │  ┌────────────────┐  │
+│  │ Packet Engine  │  │                       │  │   Web UI       │  │
+│  │ L3 → Tunnel    │  │                       │  │   :8080        │  │
+│  └────────────────┘  │                       │  └────────────────┘  │
 └──────────────────────┘                       └──────────────────────┘
 ```
 
@@ -29,10 +29,12 @@ LANnel lets a **Server** machine share its internet connection — including any
 
 ## Features
 
-- **VPN-Transparent Proxy** — Server's SOCKS5 proxy does not bind to any specific interface. If a VPN is active on the server, all proxied traffic automatically routes through it.
+- **Binary Tunnel Protocol** — CLI client communicates via a minimal 8-byte binary handshake followed by zero-overhead bidirectional relay — significantly lower latency than SOCKS5.
+- **VPN-Transparent Proxy** — Neither the tunnel server nor the SOCKS5 proxy binds to any specific interface. If a VPN is active on the server, all proxied traffic automatically routes through it.
 - **System-Wide Tunnel** — Client creates a TUN interface and reroutes the OS default gateway, capturing all TCP/UDP traffic from every application.
+- **SOCKS5 for Manual Use** — Browsers, mobile apps (via QR code), and CLI tools like `curl` can still connect directly through the SOCKS5 proxy.
 - **Web Dashboard** — Beautiful onboarding UI with auto-detected LAN IP, QR code for mobile proxy apps, and manual setup instructions.
-- **DNS Leak Prevention** — DNS queries are forwarded through the SOCKS5 tunnel as DNS-over-TCP.
+- **DNS Leak Prevention** — DNS queries are forwarded through the tunnel as DNS-over-TCP.
 - **Graceful Shutdown** — Client catches `SIGINT`/`SIGTERM` and restores the original routing table before exiting.
 - **Cross-Platform** — Builds for Linux, macOS, and Windows. Zero CGO. Single static binary per component.
 - **LAN Access Control** — Optional CIDR-based restriction on the SOCKS5 proxy (e.g., allow only `192.168.1.0/24`).
@@ -43,14 +45,15 @@ LANnel lets a **Server** machine share its internet connection — including any
 
 ### Server Component
 
-The server runs two concurrent services:
+The server runs three concurrent services:
 
 | Service | Default Port | Description |
 |---------|-------------|-------------|
-| **SOCKS5 Proxy** | `1080` | Accepts SOCKS5 connections and forwards traffic through the OS default route |
+| **Binary Tunnel** | `9090` | Accepts binary tunnel connections from CLI clients — minimal handshake, zero-framing data relay |
+| **SOCKS5 Proxy** | `1080` | Accepts SOCKS5 connections for browsers, mobile apps, and manual proxy configuration |
 | **Web UI** | `8080` | HTTP dashboard for onboarding and connection details |
 
-**Key design:** The proxy intentionally avoids binding outbound connections to a physical NIC. This means the OS routing table decides where traffic goes — if a VPN client (NordVPN, Windscribe, Nekoray, etc.) has modified the default route, proxy traffic flows through the VPN tunnel automatically.
+**Key design:** Both the tunnel and proxy intentionally avoid binding outbound connections to a physical NIC. This means the OS routing table decides where traffic goes — if a VPN client (NordVPN, Windscribe, Nekoray, etc.) has modified the default route, traffic flows through the VPN tunnel automatically.
 
 ### Client Component
 
@@ -58,29 +61,32 @@ The client performs three operations:
 
 1. **TUN Creation** — Creates a virtual network interface (`tun0` on Linux, `utunN` on macOS, TAP adapter on Windows) using the `water` library.
 2. **Route Hijacking** — Adds two covering routes (`0.0.0.0/1` + `128.0.0.0/1`) that are more specific than the default `0.0.0.0/0` route, effectively capturing all traffic without destroying the original default route. A static `/32` bypass route is added for the server's IP to prevent routing loops.
-3. **Packet Forwarding** — Reads raw IPv4 packets from the TUN device, parses IP/TCP/UDP headers, and forwards flows through the SOCKS5 proxy.
+3. **Packet Forwarding** — Reads raw IPv4 packets from the TUN device, parses IP/TCP/UDP headers, and forwards flows through the binary tunnel protocol.
 
 ### Project Structure
 
 ```
 lannel/
 ├── cmd/
-│   ├── server/
+│   ├── lannel-server/
 │   │   └── main.go              # Server entry point
-│   └── client/
+│   └── lannel-client/
 │       └── main.go              # Client entry point
 ├── pkg/
 │   ├── proxy/
 │   │   └── proxy.go             # SOCKS5 server (go-socks5 wrapper)
+│   ├── tunnel/
+│   │   ├── protocol.go          # Binary wire protocol (8-byte header)
+│   │   ├── server.go            # Tunnel server: accept, relay TCP/UDP
+│   │   └── client.go            # Tunnel client: dial through server
 │   ├── web/
 │   │   ├── web.go               # HTTP server + HTML template
 │   │   ├── netutil.go           # LAN IP auto-detection
 │   │   └── qr.go                # QR code generation
 │   └── tun/
 │       ├── tun.go               # TUN device lifecycle
-│       ├── engine.go            # Packet read loop + SOCKS5 forwarding
+│       ├── engine.go            # Packet read loop + tunnel forwarding
 │       ├── packet.go            # IPv4/TCP/UDP header parsing
-│       ├── socks.go             # SOCKS5 client dialer
 │       ├── route_linux.go       # Linux routing (ip route)
 │       ├── route_darwin.go      # macOS routing (route)
 │       └── route_windows.go     # Windows routing (route/netsh)
@@ -126,11 +132,11 @@ go build -o lannel-client ./cmd/lannel-client
 ### Cross-Compile
 
 ```bash
-# Linux
+# Linux (amd64)
 GOOS=linux GOARCH=amd64 go build -o lannel-server-linux ./cmd/lannel-server
 GOOS=linux GOARCH=amd64 go build -o lannel-client-linux ./cmd/lannel-client
 
-# Windows
+# Windows (amd64)
 GOOS=windows GOARCH=amd64 go build -o lannel-server.exe ./cmd/lannel-server
 GOOS=windows GOARCH=amd64 go build -o lannel-client.exe ./cmd/lannel-client
 
@@ -153,8 +159,9 @@ This is the machine that has internet access and/or an active VPN.
 
 Output:
 ```
-[LANnel Server] Started (SOCKS5 :1080 | Web UI :8080)
+[LANnel Server] Started (SOCKS5 :1080 | Tunnel :9090 | Web UI :8080)
 [SOCKS5] Listening on 0.0.0.0:1080
+[Tunnel] Listening on 0.0.0.0:9090
 [Web UI] Listening on http://192.168.1.10:8080
 ```
 
@@ -164,10 +171,11 @@ Open `http://192.168.1.10:8080` in a browser to see the dashboard.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--bind` | `0.0.0.0` | Bind address for both services |
-| `--socks-port` | `1080` | SOCKS5 listen port |
+| `--bind` | `0.0.0.0` | Bind address for all services |
+| `--socks-port` | `1080` | SOCKS5 listen port (browsers/mobile/manual) |
+| `--tunnel-port` | `9090` | Binary tunnel listen port (CLI client) |
 | `--http-port` | `8080` | Web UI listen port |
-| `--allowed-subnet` | *(empty)* | Restrict proxy access to a CIDR (e.g., `192.168.1.0/24`) |
+| `--allowed-subnet` | *(empty)* | Restrict SOCKS5 access to a CIDR (e.g., `192.168.1.0/24`) |
 
 #### Example: Restrict to LAN Only
 
@@ -187,11 +195,11 @@ sudo ./lannel-client -server 192.168.1.10
 
 Output:
 ```
-[LANnel Client] Target SOCKS5 proxy: 192.168.1.10:1080
+[LANnel Client] Target tunnel server: 192.168.1.10:9090
 [TUN] Created interface: tun0
 [TUN] Original gateway: 192.168.1.1 via eth0
 [TUN] Routes configured — all traffic routed through tun0
-[Engine] Forwarding packets from tun0 → SOCKS5 192.168.1.10:1080
+[Engine] Forwarding packets from tun0 via tunnel
 [LANnel Client] System-wide tunnel active. Press Ctrl+C to stop.
 ```
 
@@ -202,7 +210,7 @@ Press `Ctrl+C` to disconnect. The original routing table is restored automatical
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-server` | *(required)* | Server's LAN IP address |
-| `-port` | `1080` | Server's SOCKS5 port |
+| `-port` | `9090` | Server's tunnel port |
 
 #### Option B: Manual SOCKS5 (Browser/App)
 
@@ -238,12 +246,12 @@ curl --socks5 192.168.1.10:1080 https://ifconfig.me
 ## How It Works with VPNs
 
 ```
-Client App → TUN (tun0) → Packet Engine → SOCKS5 (TCP) → Server OS Route → VPN Tunnel → Internet
+Client App → TUN (tun0) → Packet Engine → Binary Tunnel (TCP) → Server OS Route → VPN Tunnel → Internet
 ```
 
 1. The **client** captures all outbound packets via the TUN interface
-2. Packets are parsed and translated into SOCKS5 `CONNECT` requests
-3. The **server's** SOCKS5 proxy opens an outbound connection using `net.Dial` — which follows the OS routing table
+2. Packets are parsed and forwarded through the binary tunnel protocol (8-byte handshake, then raw bidirectional relay)
+3. The **server's** tunnel opens an outbound connection using `net.Dial` — which follows the OS routing table
 4. If a VPN client is active on the server, the OS routes traffic through the VPN's virtual adapter automatically
 5. **No configuration changes needed** — start your VPN, start LANnel, done
 
@@ -263,10 +271,10 @@ The two `/1` routes are more specific than the `/0` default, so they win for all
 
 ## Security Considerations
 
-- **No authentication** — The SOCKS5 proxy has no username/password by default. Use `--allowed-subnet` to restrict access to trusted LAN ranges.
+- **No authentication** — Neither the tunnel nor the SOCKS5 proxy has authentication by default. Use `--allowed-subnet` to restrict SOCKS5 access to trusted LAN ranges.
 - **No encryption** — Traffic between client and server is unencrypted on the LAN. This is acceptable for trusted local networks. For untrusted networks, layer SSH tunneling on top.
 - **Root required** — The client needs root to create TUN interfaces and modify routes. The server does **not** require root (unless binding to ports below 1024).
-- **DNS privacy** — DNS queries are forwarded as DNS-over-TCP through the SOCKS5 tunnel, preventing DNS leaks to the local network's resolver.
+- **DNS privacy** — DNS queries are forwarded as DNS-over-TCP through the tunnel, preventing DNS leaks to the local network's resolver.
 
 ---
 
